@@ -23,8 +23,15 @@ dependencies = [
     "ruff",
     "tqdm",
     "typer",
+    "numpy",
+    "seaborn",
+    "pandas",
+    "matplotlib",
+    "scikit-learn",
+    "scipy",
+    "pyWavelets"
 ]
-requires-python = "~=3.10.0"
+requires-python = "~=3.11.7"
 
 
 [tool.ruff]
