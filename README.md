@@ -7,7 +7,7 @@
 Predictive maintenance of bearings, using a cross-modal architecture to predict the remaining useful life of bearings based on vibration and current signals,
 under different operating conditions. 
 
-###Initial structure of methodology:
+## Initial structure of methodology:
 ![image](docs/docs/methodology.drawio.png)
 
 
@@ -97,10 +97,10 @@ In order to preprocess the data it is necessary to smooth the speed and torque d
 The number of total windows produced are 600 (600*2000=1,200,000 samples).
 
 For each window, the following features are extracted: 
-- Mechanical features: Mean Value, Standard Deviation, torque, speed.
-- Electrical features: RMS, Crest Factor, Peak to Peak Value.
-- Vibration features: RMS, Crest Factor, Peak to Peak Value.
-- CWT energy for current and vibration signals.
+- **Mechanical features**: Mean Value, Standard Deviation, torque, speed.
+- **Electrical features**: RMS, Crest Factor, Peak to Peak Value.
+- **Vibration features**: RMS, Crest Factor, Peak to Peak Value.
+- **CWT energy** for current and vibration signals.
 
 The function returns a dataframe for one line per window.
 
@@ -115,11 +115,16 @@ The 90th percentile of the standard deviation of torque and speed is used as a t
 K-means clustering is implemented to group the windows in 5 operating regimes based on their mean torque and speed. These groups are the final bins for the cross-domain split.
 The decisive factor for the number of clusters is the silhouette score, which is calculated for different numbers of clusters, as well
 as the elbow method. The optimal number of clusters is 5, as shown in the following figure.
-![image](reports/figures/k_means_selection.png)
+![image](reports/figures/kmeans_k_selection.png)
+
+
 The k-means algorithm is fitted to the data and the cluster centers are shown in the following figure:
+
 ![image](reports/figures/kmeans_regime_clusters.png)
 
-the Facet grid shows how the 4 classes of data are visibly distinguishable in each of the operating regime.
+
+The Facet grid shows how the 4 classes of data are visibly distinguishable in each of the operating regime.
+
 ![image](reports/figures/fault_clustering_facetgrid.png)
 
 --------
