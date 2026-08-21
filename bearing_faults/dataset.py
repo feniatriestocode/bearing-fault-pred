@@ -9,9 +9,7 @@ import pywt
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 
-# ----------------------------------------------------------------------
-# 1. ΒΟΗΘΗΤΙΚΗ ΣΥΝΑΡΤΗΣΗ CWT-MORLET ENERGY
-# ----------------------------------------------------------------------
+
 def get_cwt_energy(signal, fs=20000, f_min=50, f_max=5000, num_scales=32):
     """Υπολογίζει τη συνολική ενέργεια CWT-Morlet ενός σήματος παραθύρου"""
     dt = 1.0 / fs
@@ -21,17 +19,14 @@ def get_cwt_energy(signal, fs=20000, f_min=50, f_max=5000, num_scales=32):
     coefs, _ = pywt.cwt(signal, scales, wavelet, sampling_period=dt)
     return np.sum(np.abs(coefs)**2)
 
-# ----------------------------------------------------------------------
-# 2. ΕΞΑΓΩΓΗ ΧΑΡΑΚΤΗΡΙΣΤΙΚΩΝ ΑΝΑ ΑΡΧΕΙΟ
-# ----------------------------------------------------------------------
 def process_bearing_file(file_path, label, load_level, window_size=2000, fs=20000, smooth_window=50):
     """
-    smooth_window: μέγεθος του rolling mean (σε δείγματα) που εφαρμόζεται
-    ΜΟΝΟ στα speed/torque σήματα πριν τον υπολογισμό std ανά παράθυρο.
-    Καθαρίζει encoder/quantization θόρυβο ώστε το std να αντανακλά
-    πραγματική μεταβολή λειτουργικής κατάστασης, όχι δειγματικό θόρυβο.
-    Δεν εφαρμόζεται σε current/vibration/voltage — αυτά χρειάζονται
-    το raw, υψηλής συχνότητας σήμα τους για το CWT.
+    smooth_window: size of the rolling mean (in samples) applied
+    ONLY to speed/torque signals before calculating the standard deviation
+    for each window. It removes encoder/quantization noise so the standard
+    deviation reflects actual changes in operating condition rather than
+    sampling noise. It is not applied to current/vibration/voltage, which
+    require their raw, high-frequency signals for the CWT.
     """
     v_df = pd.read_excel(file_path, sheet_name='Voltage').drop(columns=['Time'])
     i_df = pd.read_excel(file_path, sheet_name='Current').drop(columns=['Time'])
@@ -39,11 +34,8 @@ def process_bearing_file(file_path, label, load_level, window_size=2000, fs=2000
     s_df = pd.read_excel(file_path, sheet_name='Speed').drop(columns=['Time'])
     vib_df = pd.read_excel(file_path, sheet_name='Vibration').drop(columns=['Time'])
 
-    # Επιβεβαιωμένα column names (Healthy_50.xlsx):
-    # Voltage -> Voltage1/2/3, Current -> Current1/2/3, Torque -> Torque,
-    # Speed -> Speed, Vibration -> Vibration. Το 'Time' αφαιρέθηκε ήδη πάνω.
+    # Smoothing
 
-    # --- Smoothing πριν το windowing (μόνο speed & torque) ---
     s_smooth = s_df['Speed'].rolling(window=smooth_window, center=True, min_periods=1).mean()
     t_smooth = t_df['Torque'].rolling(window=smooth_window, center=True, min_periods=1).mean()
 
@@ -106,9 +98,6 @@ def process_bearing_file(file_path, label, load_level, window_size=2000, fs=2000
 
     return pd.DataFrame(records)
 
-# ----------------------------------------------------------------------
-# 3. ΑΥΤΟΜΑΤΗ ΣΑΡΩΣΗ ΦΑΚΕΛΩΝ & ΣΥΓΚΕΝΤΡΩΣΗ DATASET
-# ----------------------------------------------------------------------
 root_dir = '../../data'  # Ο φάκελος όπου βρίσκονται οι υποφάκελοι Damage, Healthy, Inner, Outer
 logger.info(f"Scanning root directory: {root_dir}")
 categories = ['Damage', 'Healthy', 'Inner', 'Outer']
@@ -125,11 +114,11 @@ for cat in categories:
         all_dfs.append(df_file)
 
 full_dataset = pd.concat(all_dfs, ignore_index=True)
+# save full_dataset in data/processed
+full_dataset.to_csv('../data/processed/full_dataset.csv', index=False)   
 
-# ----------------------------------------------------------------------
-# 4. ΕΛΕΓΧΟΣ ΔΙΑΚΥΜΑΝΣΕΩΝ (ΜΕΤΑ ΤΟ SMOOTHING) & ΙΣΤΟΓΡΑΜΜΑ
-# ----------------------------------------------------------------------
-logger.info(f"Συνολικά παράθυρα που εξήχθησαν: {len(full_dataset)}")
+
+logger.info(f"Total windows: {len(full_dataset)}")
 
 logger.info(
     f"Speed std -> Min: {full_dataset['speed_std'].min():.2f}, Max:"
@@ -154,7 +143,7 @@ axes[1, 0].set_title('Torque std (before smoothing)')
 full_dataset['torque_std'].hist(bins=50, ax=axes[1, 1])
 axes[1, 1].set_title('Torque std (after smoothing)')
 plt.tight_layout()
-plt.savefig('std_distributions.png', dpi=120)
+plt.savefig('../reports/figures/std_distributions.png', dpi=120)
 plt.show()
 
 logger.info(
@@ -163,11 +152,6 @@ logger.info(
     "αντί για αυθαίρετη τιμή."
 )
 
-# ----------------------------------------------------------------------
-# 5. ΦΙΛΤΡΑΡΙΣΜΑ STEADY-STATE
-# ----------------------------------------------------------------------
-# Πρόχειρα thresholds ως σημείο εκκίνησης - προσάρμοσέ τα με βάση το
-# ιστόγραμμα από το βήμα 4 (π.χ. percentile-based αντί για fixed values).
 speed_std_threshold = full_dataset['speed_std'].quantile(0.90)
 torque_std_threshold = full_dataset['torque_std'].quantile(0.90)
 
@@ -191,15 +175,11 @@ if len(df_ss) == 0:
     )
     df_ss = full_dataset.copy()
 
-# ----------------------------------------------------------------------
-# 6. 2D K-MEANS CLUSTERING ΣΤΑ (TORQUE, SPEED)
-# ----------------------------------------------------------------------
 from sklearn.metrics import silhouette_score
 
 scaler = StandardScaler()
 scaled_op_points = scaler.fit_transform(df_ss[["torque_mean", "speed_mean"]])
 
-# --- 6a. Επιλογή k: elbow (inertia) + silhouette, δοκιμή k=2..8 ---
 K_range = range(2, 9)
 inertias, sil_scores = [], []
 for k_try in K_range:
@@ -217,7 +197,7 @@ axes[1].set_xlabel('k (# clusters)')
 axes[1].set_ylabel('Silhouette score')
 axes[1].set_title('Silhouette score ανά k')
 plt.tight_layout()
-plt.savefig('kmeans_k_selection.png', dpi=120)
+plt.savefig('../reports/figures/kmeans_k_selection.png', dpi=120)
 plt.show()
 
 logger.info(
@@ -226,7 +206,6 @@ logger.info(
     " στο αριστερό plot)."
 )
 
-# --- 6b. Τελικό fit με k=5 (5 ονομαστικά φορτία) ---
 k = 5
 kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
 df_ss["regime_cluster"] = kmeans.fit_predict(scaled_op_points)
@@ -234,8 +213,7 @@ df_ss["regime_cluster"] = "Regime " + df_ss["regime_cluster"].astype(str)
 
 logger.success("Το 2D K-Means clustering completed successfully!")
 
-# --- 6c. Οπτικοποίηση ΤΟΥ ΙΔΙΟΥ ΤΟΥ CLUSTERING στο (torque, speed) επίπεδο ---
-# Αυτό δείχνει *πώς* κατέληξες στα regimes - όχι το downstream αποτέλεσμα.
+
 centers_original = scaler.inverse_transform(kmeans.cluster_centers_)
 
 plt.figure(figsize=(7.5, 6.5))
@@ -253,12 +231,9 @@ plt.ylabel('Speed (mean, per window)')
 plt.title(f'K-Means (k={k}) (torque, speed)')
 plt.legend(bbox_to_anchor=(1.02, 0.5), loc='center left')
 plt.tight_layout()
-plt.savefig('kmeans_regime_clusters.png', dpi=120, bbox_inches='tight')
+plt.savefig('../reports/figures/kmeans_regime_clusters.png', dpi=120, bbox_inches='tight')
 plt.show()
 
-# ----------------------------------------------------------------------
-# 7. FACETED SCATTER PLOT GRID
-# ----------------------------------------------------------------------
 sns.set_theme(style="whitegrid", palette="tab10")
 
 g = sns.FacetGrid(
@@ -289,5 +264,5 @@ g.figure.suptitle(
     fontsize=15, weight='bold'
 )
 
-plt.savefig('fault_clustering_facetgrid.png', dpi=120, bbox_inches='tight')
+plt.savefig('../reports/figures/fault_clustering_facetgrid.png', dpi=120, bbox_inches='tight')
 plt.show()
