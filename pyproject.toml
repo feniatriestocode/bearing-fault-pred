@@ -29,7 +29,9 @@ dependencies = [
     "matplotlib",
     "scikit-learn",
     "scipy",
-    "pyWavelets"
+    "pyWavelets",
+    "torch",
+    "tensorboard"
 ]
 requires-python = "~=3.11.7"
 

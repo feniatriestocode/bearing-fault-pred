@@ -1,0 +1,208 @@
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import typer
+from loguru import logger
+from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+
+from bearing_faults.config import MODELS_DIR, PROCESSED_DATA_DIR, PROJ_ROOT
+from bearing_faults.data_loader import BearingTensorDataset
+from bearing_faults.modeling.cnn import BaselineCNN
+from bearing_faults.modeling.vit_baseline import BaselineViT
+from bearing_faults.modeling.vit_cross_attention import (
+    DualBranchCrossAttentionViT,
+)
+
+app = typer.Typer()
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _normalize01(x: torch.Tensor) -> torch.Tensor:
+  """Per-image min-max scaling to [0,1], used strictly for TensorBoard visualization."""
+  x = x.clone()
+  b = x.shape[0]
+  flat = x.view(b, -1)
+  mins = flat.min(dim=1, keepdim=True).values
+  maxs = flat.max(dim=1, keepdim=True).values
+  flat = (flat - mins) / (maxs - mins + 1e-8)
+  return flat.view_as(x)
+
+
+# FIX 1: Extended mapping accepting CLI variants and class names
+def build_model(name: str) -> nn.Module:
+  key = name.lower().strip()
+  if key in ["cnn", "baseline_cnn", "baselinecnn"]:
+    return BaselineCNN(in_channels=2, num_classes=4)
+  if key in ["vit", "vit_baseline", "baseline_vit", "baselinevit"]:
+    return BaselineViT(in_channels=2, num_classes=4)
+  if key in [
+      "cross_attention",
+      "vit_cross_attention",
+      "dualbranchcrossattentionvit",
+  ]:
+    return DualBranchCrossAttentionViT(num_classes=4)
+  raise ValueError(f"Unknown model: {name}")
+
+
+def run_epoch(
+    model, loader, criterion, optimizer=None, max_grad_norm: float = 1.0
+) -> tuple[float, float]:
+  is_train = optimizer is not None
+  model.train() if is_train else model.eval()
+
+  total_loss, correct, total = 0.0, 0, 0
+  with torch.set_grad_enabled(is_train):
+    for batch in loader:
+      x = batch["scalogram"].to(DEVICE)
+      y = batch["label"].to(DEVICE)
+      cond = batch["condition"].to(DEVICE)
+
+      # FIX 2: Dynamic range log-scaling on CWT coefficients
+      x = torch.log1p(torch.clamp(x, min=0.0))
+
+      logits = model(x, condition=cond)
+      loss = criterion(logits, y)
+
+      if is_train:
+        optimizer.zero_grad()
+        loss.backward()
+        # FIX 3: Gradient clipping to prevent exploding loss
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+        optimizer.step()
+
+      total_loss += loss.item() * x.size(0)
+      correct += (logits.argmax(dim=-1) == y).sum().item()
+      total += x.size(0)
+
+  return total_loss / total, correct / total
+
+
+@app.command()
+def main(
+    model: str = typer.Option(..., help="cnn | vit | cross_attention"),
+    test_regime: int = typer.Option(
+        2, help="regime_id outside training - unseen cross-domain test set"
+    ),
+    epochs: int = 30,
+    batch_size: int = 32,
+    # FIX 4: Lower default LR suitable for Transformers & small batch training
+    lr: float = 1e-4,
+    features_path: Path = PROCESSED_DATA_DIR / "full_dataset.csv",
+    tensors_path: Path = PROCESSED_DATA_DIR / "bearing_tensors.npy",
+):
+  df = pd.read_csv(features_path)
+  tensors = np.load(tensors_path)
+  assert len(df) == len(tensors), (
+      f"CSV has {len(df)} rows but tensors has {len(tensors)} - re-run features"
+      " extraction."
+  )
+
+  ss_mask = (df["state"] == "Steady-State").values
+  df_ss = df[ss_mask].reset_index(drop=True)
+  tensors_ss = tensors[ss_mask]
+
+  is_test_regime = df_ss["regime_id"] == test_regime
+  trainval_df = df_ss[~is_test_regime].reset_index(drop=True)
+  trainval_tensors = tensors_ss[~is_test_regime.values]
+  test_df = df_ss[is_test_regime].reset_index(drop=True)
+  test_tensors = tensors_ss[is_test_regime.values]
+
+  train_idx, val_idx = train_test_split(
+      np.arange(len(trainval_df)),
+      test_size=0.2,
+      stratify=trainval_df["fault_class"],
+      random_state=42,
+  )
+  train_df = trainval_df.iloc[train_idx].reset_index(drop=True)
+  train_tensors = trainval_tensors[train_idx]
+  val_df = trainval_df.iloc[val_idx].reset_index(drop=True)
+  val_tensors = trainval_tensors[val_idx]
+
+  logger.info(
+      f"Train: {len(train_df)} | Val: {len(val_df)} | "
+      f"Test (regime {test_regime}, unseen): {len(test_df)}"
+  )
+
+  train_ds = BearingTensorDataset(train_tensors, train_df)
+  val_ds = BearingTensorDataset(val_tensors, val_df)
+  test_ds = BearingTensorDataset(test_tensors, test_df)
+
+  train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+  val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+  test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+
+  net = build_model(model).to(DEVICE)
+
+  # FIX 5: AdamW with weight decay + Cosine Annealing Scheduler
+  optimizer = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-2)
+  scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+      optimizer, T_max=epochs, eta_min=1e-6
+  )
+  criterion = nn.CrossEntropyLoss()
+
+  run_name = f"{model}_testregime{test_regime}"
+  writer = SummaryWriter(log_dir=str(PROJ_ROOT / "reports" / "runs" / run_name))
+  logger.info(
+      f"TensorBoard: tensorboard --logdir {PROJ_ROOT / 'reports' / 'runs'}"
+  )
+
+  MODELS_DIR.mkdir(parents=True, exist_ok=True)
+  best_ckpt_path = MODELS_DIR / f"best_{model}.pt"
+
+  best_val_acc = 0.0
+  for epoch in range(1, epochs + 1):
+    train_loss, train_acc = run_epoch(net, train_loader, criterion, optimizer)
+    val_loss, val_acc = run_epoch(net, val_loader, criterion)
+    scheduler.step()
+
+    logger.info(
+        f"Epoch {epoch:03d} | train_loss={train_loss:.4f}"
+        f" train_acc={train_acc:.4f} | val_loss={val_loss:.4f}"
+        f" val_acc={val_acc:.4f}"
+    )
+    writer.add_scalars("Loss", {"train": train_loss, "val": val_loss}, epoch)
+    writer.add_scalars("Accuracy", {"train": train_acc, "val": val_acc}, epoch)
+    writer.add_scalar("LR", optimizer.param_groups[0]["lr"], epoch)
+
+    if epoch == 1:
+      sample_x = next(iter(train_loader))["scalogram"][:8]
+      writer.add_images(
+          "Sample/vibration_scalograms", _normalize01(sample_x[:, 0:1]), epoch
+      )
+      writer.add_images(
+          "Sample/current_scalograms", _normalize01(sample_x[:, 1:2]), epoch
+      )
+
+    if val_acc > best_val_acc:
+      best_val_acc = val_acc
+      torch.save(net.state_dict(), best_ckpt_path)
+
+  net.load_state_dict(torch.load(best_ckpt_path))
+  test_loss, test_acc = run_epoch(net, test_loader, criterion)
+  logger.success(
+      f"[Cross-domain test, regime {test_regime}, unseen] "
+      f"loss={test_loss:.4f} acc={test_acc:.4f}"
+  )
+
+  writer.add_hparams(
+      {
+          "model": model,
+          "lr": lr,
+          "batch_size": batch_size,
+          "test_regime": test_regime,
+      },
+      {
+          "hparam/best_val_acc": best_val_acc,
+          "hparam/cross_domain_test_acc": test_acc,
+      },
+  )
+  writer.close()
+
+
+if __name__ == "__main__":
+  app()

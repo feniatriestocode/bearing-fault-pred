@@ -5,6 +5,7 @@ files — no dependency on build_tensors.py or any pooled/downsampled tensor.
 import glob
 import os
 
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -41,6 +42,7 @@ for cat in CATEGORIES:
         scalo, aspect='auto', origin='lower',
         extent=[0, scalo.shape[-1] / FS, freqs.min(), freqs.max()],
         cmap='viridis',
+        norm=mcolors.LogNorm(vmin=scalo[scalo > 0].min(), vmax=scalo.max()),
     )
     ax.set_title(f'{cat} — {name}')
     ax.set_xlabel('Time (s)')

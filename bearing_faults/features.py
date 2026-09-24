@@ -1,9 +1,20 @@
 """Signal processing and multimodal 2D tensor generation."""
-import loguru
+import glob
+import os
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import pywt
 import torch
 import torch.nn as nn
+import typer
+from loguru import logger
+from tqdm import tqdm
+
+from bearing_faults.config import PROCESSED_DATA_DIR, RAW_DATA_DIR
+
+app = typer.Typer()
 
 
 def compute_cwt_morlet(
@@ -61,10 +72,7 @@ class PhysicsPreservingDownsampler(nn.Module):
   def _pool_freq_axis(freq_bins_hz: np.ndarray, out_freq_len: int) -> np.ndarray:
     """Downsamples a 1D array of frequency-bin centers (Hz) to match the
     pooled tensor's frequency axis length, via linear interpolation over
-    bin index. This is an approximation (max-pool is non-linear so the
-    'true' representative frequency of a pooled bin is ill-defined), but
-    it is the standard, defensible choice: it gives each pooled row the
-    Hz value at the center of the original bins it was built from.
+    bin index.
     """
     if len(freq_bins_hz) == out_freq_len:
       return freq_bins_hz.astype(np.float32)
@@ -82,16 +90,12 @@ class PhysicsPreservingDownsampler(nn.Module):
         x: Tensor of shape [Batch, Channels=2, Freqs=64, Time=2000].
            Channel 0 = vibration, Channel 1 = current.
         vib_freq_bins_hz: 1D array, Hz centers of x[:,0]'s frequency axis
-            BEFORE pooling (i.e. the `frequencies` returned by
-            compute_cwt_morlet for the vibration signal).
+            BEFORE pooling.
         cur_freq_bins_hz: same, for the current signal (x[:,1]).
 
     Returns:
         pooled: Tensor of shape [Batch, Channels=2, Height, Width].
-        pooled_freq_bins: dict with 'vibration' and 'current' keys, each a
-            1D numpy array of length `Height` giving the Hz center of each
-            row AFTER pooling. Use this (not a re-derived linspace) when
-            computing distance-to-BPFO/BPFI for the physics-warped PE.
+        pooled_freq_bins: dict with 'vibration' and 'current' keys.
     """
     vib_ds = self.max_pool(x[:, 0:1])
     cur_ds = self.avg_pool(x[:, 1:2])
@@ -103,3 +107,78 @@ class PhysicsPreservingDownsampler(nn.Module):
         "current": self._pool_freq_axis(cur_freq_bins_hz, out_h),
     }
     return pooled, pooled_freq_bins
+
+
+# ----------------------------------------------------------------------
+# CLI: φτιάχνει bearing_tensors.npy, aligned 1:1 με το full_dataset.csv
+# (ίδια σειρά αρχείων/windows όπως το dataset.py — sorted() παντού)
+# ----------------------------------------------------------------------
+@app.command()
+def main(
+    categories: list[str] = ["Damage", "Healthy", "Inner", "Outer"],
+    window_size: int = 1000,
+    stride: int = 500,
+    fs: int = 20000,
+    output_size: int = 64,
+):
+  """Ξαναδιαβάζει τα raw .xlsx και φτιάχνει τα [N, 2, 64, 64] scalogram
+  tensors, στην ΙΔΙΑ ακριβώς σειρά αρχείων/windows με το dataset.py, ώστε
+  να ταιριάζουν γραμμή-προς-γραμμή με το full_dataset.csv.
+
+  ΣΗΜΑΝΤΙΚΟ: window_size/stride ΠΡΕΠΕΙ να είναι ΙΔΙΑ με ό,τι πέρασες στο
+  `python -m bearing_faults.dataset` - αλλιώς misalignment (διαφορετικός
+  αριθμός windows/γραμμών ανάμεσα σε CSV και tensors).
+
+  Τρέξε ΑΦΟΥ έχει τρέξει το dataset.py.
+  """
+  downsampler = PhysicsPreservingDownsampler(output_size=(output_size, output_size))
+
+  tensors = []
+  freq_bins_vib, freq_bins_cur = None, None
+  row_count = 0
+
+  for cat in categories:
+    cat_path = RAW_DATA_DIR / cat
+    xlsx_files = sorted(glob.glob(str(cat_path / "*.xlsx")))
+    logger.info(f"'{cat}': {len(xlsx_files)} αρχεία")
+
+    for f in tqdm(xlsx_files, desc=cat):
+      vib_df = pd.read_excel(f, sheet_name="Vibration").drop(columns=["Time"])
+      i_df = pd.read_excel(f, sheet_name="Current").drop(columns=["Time"])
+      n_windows = (len(vib_df) - window_size) // stride + 1
+
+      for w in range(n_windows):
+        s = w * stride
+        e = s + window_size
+        vib_win = vib_df["Vibration"].iloc[s:e].values.astype(np.float32)
+        cur_win = i_df.iloc[s:e, 0].values.astype(np.float32)  # Current1 (πρώτη φάση)
+
+        vib_scalo, vib_freqs = compute_cwt_morlet(vib_win, fs=fs, f_min=50, f_max=8000, num_scales=64)
+        cur_scalo, cur_freqs = compute_cwt_morlet(cur_win, fs=fs, f_min=10, f_max=1000, num_scales=64)
+
+        x = torch.tensor(np.stack([vib_scalo, cur_scalo]))[None]  # [1, 2, 64, window_size]
+        pooled, freq_bins = downsampler(x, vib_freqs, cur_freqs)
+        tensors.append(pooled[0].numpy())  # [2, 64, 64]
+
+        if freq_bins_vib is None:
+          freq_bins_vib = freq_bins["vibration"]
+          freq_bins_cur = freq_bins["current"]
+        row_count += 1
+
+  tensors_2d = np.stack(tensors)  # [N, 2, 64, 64]
+
+  os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
+  np.save(PROCESSED_DATA_DIR / "bearing_tensors.npy", tensors_2d)
+  np.save(PROCESSED_DATA_DIR / "freq_bins_vib.npy", freq_bins_vib)
+  np.save(PROCESSED_DATA_DIR / "freq_bins_cur.npy", freq_bins_cur)
+
+  logger.success(f"Built {row_count} tensors, shape {tensors_2d.shape}")
+  logger.info(
+      "Cross-check: αυτός ο αριθμός ΠΡΕΠΕΙ να ταιριάζει με τις γραμμές του "
+      "full_dataset.csv. Αν δεν ταιριάζει, κάτι διαφοροποιήθηκε στη σειρά "
+      "αρχείων/windows ανάμεσα στα δύο scripts - μην προχωρήσεις."
+  )
+
+
+if __name__ == "__main__":
+  app()
