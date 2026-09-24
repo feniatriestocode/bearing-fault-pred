@@ -44,6 +44,13 @@ MANIFEST
 *.manifest
 *.spec
 
+models/
+reports/runs/
+reports/**
+*.pt
+*.pth
+*.tfevents.*
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
