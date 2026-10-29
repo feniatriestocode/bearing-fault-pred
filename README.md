@@ -236,6 +236,5 @@ python -m bearing_faults.modeling.train --model cnn --epochs 30 --batch-size 32 
 - [x] Synchronized overlapping window extraction (`dataset.py`) and 2D $K$-Means operating regime clustering.
 - [x] Multimodal CWT Morlet feature extraction with `PhysicsPreservingDownsampler` and saved physical frequency bins (`freq_bins_vib.npy`, `freq_bins_cur.npy`).
 - [x] Implementation and 5-fold LORO evaluation of `BaselineCNN`, `BaselineViT`, and `DualBranchCrossAttentionViT`.
-- [ ] Consolidate `bearing_faults/modeling/train1.txt` into `train.py` as the default training entrypoint.
 - [ ] Implement the **Physics Module** (`BearingKinematics` for $\text{BPFO}$, $\text{BPFI}$, $\text{BSF}$, $\text{FTF}$) and **Physics-Warped Positional Encoding (PWPE)** using the saved `freq_bins_*.npy` arrays and instantaneous window speed.
 - [ ] Integrate **FiLM operating-condition modulation** ($[\text{Speed}, \text{Torque}]$) at the Transformer bottleneck and evaluate against non-physics positional encoding controls.

@@ -189,3 +189,11 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Models
+*.pt
+*.pth
+*.npy
+*.npz
+/reports/runs
+/reports/results/confusion
