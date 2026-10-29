@@ -103,15 +103,17 @@ logger.info(f"Scanning root directory: {root_dir}")
 categories = ['Damage', 'Healthy', 'Inner', 'Outer']
 all_dfs = []
 
-for cat in categories:
-    cat_path = os.path.join(root_dir, cat)
-    xlsx_files = glob.glob(os.path.join(cat_path, '*.xlsx'))
-    logger.info(f"Processing category '{cat}' with {len(xlsx_files)} files.")
-    for f in xlsx_files:
-        filename = os.path.basename(f)
-        load_tag = filename.split('_')[-1].replace('.xlsx', '') + '%'
-        df_file = process_bearing_file(f, label=cat, load_level=load_tag)
-        all_dfs.append(df_file)
+    for cat in categories:
+        cat_path = os.path.join(root_dir, cat)
+        # sorted() είναι κρίσιμο - πρέπει να ταιριάζει ΑΚΡΙΒΩΣ με τη σειρά που
+        # θα χρησιμοποιήσει το features.py, αλλιώς τα tensors misalign με τις γραμμές!!!
+        xlsx_files = sorted(glob.glob(os.path.join(cat_path, '*.xlsx')))
+        logger.info(f"Processing category '{cat}' with {len(xlsx_files)} files.")
+        for f in xlsx_files:
+            filename = os.path.basename(f)
+            load_tag = filename.split('_')[-1].replace('.xlsx', '') + '%'
+            df_file = process_bearing_file(f, label=cat, load_level=load_tag, window_size=window_size, stride=stride)
+            all_dfs.append(df_file)
 
 full_dataset = pd.concat(all_dfs, ignore_index=True)
 # save full_dataset in data/processed
@@ -169,11 +171,9 @@ df_ss = full_dataset[full_dataset["state"] == "Steady-State"].copy()
 
 logger.info(f"Steady-State δείγματα: {len(df_ss)} / {len(full_dataset)}")
 
-if len(df_ss) == 0:
-    logger.warning(
-        "The filter was too strict! Using all data for clustering."
-    )
-    df_ss = full_dataset.copy()
+    if len(df_ss) == 0:
+        logger.warning("The filter was too strict! Using all data for clustering.") #wtf
+        df_ss = full_dataset.copy()
 
 from sklearn.metrics import silhouette_score
 
