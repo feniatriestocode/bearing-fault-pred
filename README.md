@@ -91,7 +91,7 @@ Diagnostic full-resolution scalograms (in both linear scale and $\text{dB}$) are
 
 ## Models
 
-All models share a unified forward signature `model(x, condition)` taking the scalogram tensor $\mathbf{X} \in \mathbb{R}^{B \times 2 \times 64 \times 64}$ and operating condition $\mathbf{c} = [\text{speed\_mean}, \text{torque\_mean}] \in \mathbb{R}^{B \times 2}$:
+All models share a unified forward signature `model(x, condition)` taking the scalogram tensor $\mathbf{X} \in \mathbb{R}^{B \times 2 \times 64 \times 64}$ and operating condition $\mathbf{c} = [\texttt{speed\_mean}, \texttt{torque\_mean}] \in \mathbb{R}^{B \times 2}$
 
 | `--model` | Implementation | Description |
 |---|---|---|
