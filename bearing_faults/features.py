@@ -1,9 +1,26 @@
-"""Signal processing and multimodal 2D tensor generation."""
-import loguru
+"""Signal processing and multimodal 2D tensor generation.
+
+CLI:
+    python -m bearing_faults.features --window-size 1000 --stride 500
+
+Builds bearing_tensors.npy ([N, 2, 64, 64], LINEAR power; the dB scaling is
+done at training time), aligned 1:1 with full_dataset.csv from dataset.py.
+"""
+import glob
+import os
+
+from loguru import logger
 import numpy as np
+import pandas as pd
 import pywt
 import torch
 import torch.nn as nn
+from tqdm import tqdm
+import typer
+
+from bearing_faults.config import PROCESSED_DATA_DIR, RAW_DATA_DIR
+
+app = typer.Typer()
 
 
 def compute_cwt_morlet(
@@ -79,7 +96,7 @@ class PhysicsPreservingDownsampler(nn.Module):
       cur_freq_bins_hz: np.ndarray,
   ) -> tuple[torch.Tensor, dict[str, np.ndarray]]:
     """Args:
-        x: Tensor of shape [Batch, Channels=2, Freqs=64, Time=2000].
+        x: Tensor of shape [Batch, Channels=2, Freqs=64, Time=window_size].
            Channel 0 = vibration, Channel 1 = current.
         vib_freq_bins_hz: 1D array, Hz centers of x[:,0]'s frequency axis
             BEFORE pooling (i.e. the `frequencies` returned by
@@ -103,3 +120,93 @@ class PhysicsPreservingDownsampler(nn.Module):
         "current": self._pool_freq_axis(cur_freq_bins_hz, out_h),
     }
     return pooled, pooled_freq_bins
+
+
+# ----------------------------------------------------------------------
+# CLI: builds bearing_tensors.npy, aligned 1:1 with full_dataset.csv
+# (same file/window order as dataset.py: categories in the given order,
+# sorted() files, windows 0..n-1)
+# ----------------------------------------------------------------------
+@app.command()
+def main(
+    categories: list[str] = ["Damage", "Healthy", "Inner", "Outer"],
+    window_size: int = 1000,
+    stride: int = 500,
+    fs: int = 20000,
+    output_size: int = 64,
+):
+  """Re-reads the raw .xlsx files and builds the [N, 2, 64, 64] scalogram
+  tensors, in EXACTLY the same file/window order as dataset.py, so that they
+  match full_dataset.csv row by row.
+
+  IMPORTANT: window_size/stride MUST be the same as the ones passed to
+  `python -m bearing_faults.dataset`, otherwise the CSV and the tensors have a
+  different number of rows. Run AFTER dataset.py.
+  """
+  downsampler = PhysicsPreservingDownsampler(output_size=(output_size, output_size))
+
+  tensors = []
+  keys = []  # source_file of every window, in order, to verify the alignment with the CSV
+  freq_bins_vib, freq_bins_cur = None, None
+
+  for cat in categories:
+    cat_path = RAW_DATA_DIR / cat
+    xlsx_files = sorted(glob.glob(str(cat_path / "*.xlsx")))
+    logger.info(f"'{cat}': {len(xlsx_files)} files")
+
+    for f in tqdm(xlsx_files, desc=cat):
+      vib_df = pd.read_excel(f, sheet_name="Vibration").drop(columns=["Time"])
+      i_df = pd.read_excel(f, sheet_name="Current").drop(columns=["Time"])
+      assert len(vib_df) == len(i_df), f"Vibration/Current length differs: {f}"
+      n_windows = max(0, (len(vib_df) - window_size) // stride + 1)
+
+      for w in range(n_windows):
+        s = w * stride
+        e = s + window_size
+        vib_win = vib_df["Vibration"].iloc[s:e].values.astype(np.float32)
+        cur_win = i_df.iloc[s:e, 0].values.astype(np.float32)  # Current1 (phase 1)
+
+        vib_scalo, vib_freqs = compute_cwt_morlet(
+            vib_win, fs=fs, f_min=50, f_max=8000, num_scales=64
+        )
+        cur_scalo, cur_freqs = compute_cwt_morlet(
+            cur_win, fs=fs, f_min=10, f_max=1000, num_scales=64
+        )
+
+        x = torch.tensor(np.stack([vib_scalo, cur_scalo]))[None]  # [1, 2, 64, window_size]
+        with torch.no_grad():
+          pooled, freq_bins = downsampler(x, vib_freqs, cur_freqs)
+        tensors.append(pooled[0].numpy())  # [2, 64, 64], LINEAR power
+        keys.append(os.path.basename(f))
+
+        if freq_bins_vib is None:
+          freq_bins_vib = freq_bins["vibration"]
+          freq_bins_cur = freq_bins["current"]
+
+  if not tensors:
+    raise FileNotFoundError(f"No windows built. Check {RAW_DATA_DIR} and --window-size.")
+  tensors_2d = np.stack(tensors)  # [N, 2, 64, 64]
+
+  # Alignment check against full_dataset.csv (if it exists)
+  csv_path = PROCESSED_DATA_DIR / "full_dataset.csv"
+  if csv_path.exists():
+    csv_keys = pd.read_csv(csv_path, usecols=["source_file"])["source_file"].tolist()
+    if csv_keys != keys:
+      raise RuntimeError(
+          f"Tensors ({len(keys)} rows) are NOT aligned with {csv_path.name}"
+          f" ({len(csv_keys)} rows). Re-run dataset.py and features.py with the"
+          " same --window-size / --stride / --categories. Nothing was saved."
+      )
+    logger.success(f"Alignment with {csv_path.name} verified ({len(keys)} rows).")
+  else:
+    logger.warning(f"{csv_path} not found: alignment NOT verified. Run dataset.py first.")
+
+  os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
+  np.save(PROCESSED_DATA_DIR / "bearing_tensors.npy", tensors_2d)
+  np.save(PROCESSED_DATA_DIR / "freq_bins_vib.npy", freq_bins_vib)
+  np.save(PROCESSED_DATA_DIR / "freq_bins_cur.npy", freq_bins_cur)
+  logger.success(f"Built {len(keys)} tensors, shape {tensors_2d.shape}")
+
+
+if __name__ == "__main__":
+  app()

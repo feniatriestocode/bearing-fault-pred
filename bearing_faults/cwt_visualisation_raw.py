@@ -7,16 +7,16 @@ import glob
 import os
 from pathlib import Path
 from bearing_faults.config import RAW_DATA_DIR
-from features import compute_cwt_morlet
+from bearing_faults.features import compute_cwt_morlet
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 CATEGORIES = ['Damage', 'Healthy', 'Inner', 'Outer']
-WINDOW_SIZE = 1000  # 1000 samples ώστε να ταιριάζει με το pipeline του μοντέλου
+WINDOW_SIZE = 1000  # 1000 samples 
 FS = 20000
 
-# Αποθήκευση στο reports/figures/scalograms του project
+# save to reports/figures/scalograms 
 OUT_DIR = Path(RAW_DATA_DIR).resolve().parent.parent / 'reports' / 'scalograms'
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -32,7 +32,7 @@ for cat in CATEGORIES:
   cat_path = Path(RAW_DATA_DIR) / cat
   xlsx_files = sorted(glob.glob(str(cat_path / '*.xlsx')))
 
-  # Ασφαλής έλεγχος πριν το index [0]
+  # check 
   if not xlsx_files:
     print(f"Δεν βρέθηκαν .xlsx αρχεία στον φάκελο: {cat_path}")
     continue
@@ -64,7 +64,7 @@ for cat in CATEGORIES:
   for ax, scalo, freqs, name, cmap in plots:
     scalo_db, vmin, vmax = to_db(scalo, dynamic_range_db=50.0)
 
-    # Έλεγχος διάταξης αξόνων
+    # another check 
     if freqs[0] > freqs[-1]:
       scalo_db = np.flipud(scalo_db)
       f_low, f_high = freqs[-1], freqs[0]
@@ -94,4 +94,4 @@ for cat in CATEGORIES:
   out_path = OUT_DIR / f'{cat}_raw_scalogram.png'
   plt.savefig(out_path, dpi=140)
   plt.close(fig)
-  print(f'Αποθηκεύτηκε: {out_path}')
+  print(f'Saved: {out_path}')

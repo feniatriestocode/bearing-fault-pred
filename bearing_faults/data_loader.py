@@ -24,11 +24,20 @@ class BearingTensorDataset(Dataset):
       tensors_2d: np.ndarray,
       df_metadata: pd.DataFrame,
       label_col: str = "fault_class",
+      augment: bool = False,
+      max_time_shift: int = 8,
   ):
     """Args:
         tensors_2d: Numpy array of precomputed tensors [N, 2, 64, 64].
         df_metadata: Metadata DataFrame aligned with tensors_2d.
         label_col: Name of the class column.
+        augment: If True, applies a random circular shift along the TIME axis
+            (same shift for both channels), up to `max_time_shift` columns of
+            the 64-column time axis. It only moves content in time, so it does
+            not assume anything about the value range of the tensors (works on
+            the dB-scaled [0, 1] input used in train.py). Use True for the
+            training set only.
+        max_time_shift: Maximum |shift| in columns.
     """
     if len(tensors_2d) != len(df_metadata):
       raise ValueError(
@@ -37,6 +46,8 @@ class BearingTensorDataset(Dataset):
           "same order."
       )
 
+    self.augment = augment
+    self.max_time_shift = max_time_shift
     self.tensors = torch.tensor(tensors_2d, dtype=torch.float32)
     self.df = df_metadata.reset_index(drop=True)
 
@@ -79,8 +90,12 @@ class BearingTensorDataset(Dataset):
     return len(self.df)
 
   def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+    x = self.tensors[idx]
+    if self.augment and self.max_time_shift > 0:
+      shift = int(torch.randint(-self.max_time_shift, self.max_time_shift + 1, (1,)).item())
+      x = torch.roll(x, shifts=shift, dims=-1)
     return {
-        "scalogram": self.tensors[idx],
+        "scalogram": x,
         "condition": self.conditions[idx],
         "label": self.labels[idx],
         "regime": self.regimes[idx],
